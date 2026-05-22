@@ -1,0 +1,69 @@
+import { request } from '../request';
+
+/** Paginated menu list */
+export function fetchMenuList(params: { page: number; size: number }, data: Api.NavMenu.MenuFilter = {}) {
+  return request<Api.NavMenu.PageResult>({
+    url: '/menu/list',
+    method: 'post',
+    params,
+    data
+  });
+}
+
+/** Get menu tree */
+export function fetchMenuTree() {
+  return request<Api.NavMenu.MenuTreeNode[]>({ url: '/menu/tree' });
+}
+
+/** Create a menu */
+export function fetchMenuCreate(data: Api.NavMenu.MenuCreate) {
+  return request({ url: '/menu/create', method: 'post', data });
+}
+
+/** Update a menu */
+export function fetchMenuUpdate(id: number, data: Api.NavMenu.MenuCreate) {
+  return request({ url: `/menu/${id}`, method: 'put', data });
+}
+
+/** Batch update menus (for drag sort) */
+export function fetchMenuBatchUpdate(data: Array<{ id: number; order: number }>) {
+  return request({ url: '/menu/update/all', method: 'put', data });
+}
+
+/** Delete menus by ids */
+export function fetchMenuDelete(ids: string, childrenAction = 'move_up', linksAction = 'unlink') {
+  return request({
+    url: `/menu/${ids}`,
+    method: 'delete',
+    params: { children_action: childrenAction, links_action: linksAction }
+  });
+}
+
+/** Query deletion impact for menus */
+export function fetchMenuImpact(ids: string) {
+  return request<{ child_count: number; link_count: number; menu_titles: string[] }>({
+    url: '/menu/impact',
+    params: { ids }
+  });
+}
+
+/** Import menus from JSON file (async task with WebSocket progress) */
+export function fetchMenuImport(file: File) {
+  const formData = new FormData();
+  formData.append('file', file);
+  return request<{ task_id: string }>({
+    url: '/menu/import',
+    method: 'post',
+    headers: { 'Content-Type': 'multipart/form-data' },
+    data: formData
+  });
+}
+
+/** Import menus from pre-selected JSON data (async task with WebSocket progress) */
+export function fetchMenuImportJson(data: { items: any[] }) {
+  return request<{ task_id: string }>({
+    url: '/menu/import-json',
+    method: 'post',
+    data
+  });
+}

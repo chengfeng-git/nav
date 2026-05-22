@@ -1,44 +1,30 @@
-from fastapi_cache import FastAPICache
-from fastapi_cache.backends.inmemory import InMemoryBackend
-
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
-from tortoise.contrib.fastapi import register_tortoise
+from fastapi_cache import FastAPICache
+from fastapi_cache.backends.inmemory import InMemoryBackend
+from loguru import logger
+from tortoise import Tortoise
 
 from migrate import init_data
 from settings import settings
 
 
-def register_init(app: FastAPI) -> None:
-    """
-    初始化连接
-    :param app:
-    :return:
-    """
-
-    @app.on_event("startup")
-    async def init_connect():
-        # 初始化数据
-        await init_data()
-        # 连接数据库
-        register_tortoise(
-            app,
-            config=settings.DATABASE_CONFIG,
-            generate_schemas=True,  # True 表示连接数据库的时候同步创建表
-            add_exception_handlers=True,
-        )
-        # 初始化 apscheduler
-        # schedule.init_scheduler()
-        # 初始化fastapi-cache2
-        FastAPICache.init(InMemoryBackend(), prefix='fastapi-cache')
-        pass
-
-    @app.on_event('shutdown')
-    async def shutdown_connect():
-        """
-        关闭
-        :return:
-        """
-        # await FastAPICache.clear()
-        pass
-
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await init_data()
+    await Tortoise.init(config=settings.DATABASE_CONFIG, _enable_global_fallback=True)
+    await Tortoise.generate_schemas()
+    FastAPICache.init(InMemoryBackend(), prefix="fastapi-cache")
+    # 从数据库加载动态 CORS 配置
+    from core.middleware import load_cors_origins
+    await load_cors_origins()
+    # Warm tree cache at startup so the first request is instant
+    try:
+        from api.menu.views import warm_tree_cache
+        await warm_tree_cache()
+        logger.info("Tree cache warmed successfully")
+    except Exception as e:
+        logger.warning(f"Failed to warm tree cache: {e}")
+    yield
+    await Tortoise.close_connections()

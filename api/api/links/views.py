@@ -1,152 +1,464 @@
-from typing import Callable
+import asyncio
+import json
 
-from fastapi_cache import FastAPICache
-from fastapi import Depends, HTTPException, UploadFile, File
-from fastapi.responses import JSONResponse
-
-from fastapi_pagination import Params
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi.responses import Response
+from fastapi_pagination import Page, Params
 from fastapi_pagination.ext.tortoise import paginate
+from tortoise.expressions import Q
+from tortoise.transactions import in_transaction
 
-from fastapi_tortoise_crud import ModelCrud, BaseApiOut
-from models import Links, Menu, User, Site
-from .utils import get_site_info, CdnImg, ignore_async_errors
-from .schemas import CreateMenuSchema, LinkSchemaList, FilterSchemaList
-from auth.auth import get_current_user, is_login
-
-
-class LinkCrud(ModelCrud):
-
-    @property
-    def route_list(self) -> Callable:
-        schema_filters = self.schema_filters
-
-        async def route(filters: schema_filters,
-                        params: Params = Depends(), order_by: str = '-create_time',
-                        user: User = Depends(is_login)):
-            item = await self.pre_list(filters)
-            queryset = self.model.filter()
-            # item = filters.model_dump(exclude_defaults=True)
-            if item.get('menus'):
-                menus = item.pop('menus')
-                queryset = queryset.filter(menus__in=menus)
-            if not user:
-                queryset = queryset.filter(is_vip=False)
-            if order_by:
-                queryset = queryset.order_by(*order_by.split(','))
-            # search_item = {f'{k}__icontains': v for k, v in item.items() if v}
-            queryset = queryset.filter(**item)
-            data = await paginate(queryset, params, True)
-            return BaseApiOut(data=data)
-
-        return route
-
-    @property
-    def route_create(self) -> Callable:
-        schema_create = self.schema_create
-
-        async def route(item: schema_create):
-            # 清除链接缓存
-            await FastAPICache.clear()
-            data = item.dict(exclude_unset=True, exclude={'menus'})
-            pass
-            link = await self.model.create(**data)
-            if item.menus:
-                menus = await Menu.filter(id__in=item.menus)
-                await link.menus.add(*menus)
-
-            return BaseApiOut(data=data)
-
-        return route
-
-    @property
-    def route_update(self) -> Callable:
-        schema_update = self.schema_update
-
-        async def route(item_id: str, item: schema_update):
-            # 清除链接缓存
-            await FastAPICache.clear()
-            link = await self.model.get_or_none(id=item_id)
-            if not link:
-                return BaseApiOut(code=400, message='链接不存在')
-            data_dict = item.dict(exclude_unset=True, exclude={'menus'})
-            if data_dict:
-                updated_item = await self.model.filter(id=item_id).update(**data_dict)
-            pass
-            # 如果需要更新菜单
-            if isinstance(item.menus, list):
-                await link.menus.clear()
-                # 删除关联
-                menus = await Menu.filter(id__in=item.menus)
-                await link.menus.add(*menus)
-            return BaseApiOut()
-
-        return route
-
-
-link_router = LinkCrud(Links,
-                       schema_list=LinkSchemaList,
-                       schema_create=CreateMenuSchema,
-                       schema_update=CreateMenuSchema,
-                       schema_filters=FilterSchemaList
-                       ).register_crud(
-    depends_create=[Depends(get_current_user)],
-    depends_update=[Depends(get_current_user)]
+from auth.auth import get_current_user, get_current_super_user, is_login
+from common.errors import not_found
+from common.response import BaseApiOut
+from models import Links, Menu, User
+from .schemas import CreateMenuSchema, FilterSchemaList, LinkImportRequest, LinkSchemaList, LinkUpdateAllSchema
+from .service import (
+    attach_link_menus,
+    build_link_search_filters,
+    clear_link_cache,
+    create_links_batch,
+    parse_order_by,
+    sync_link_cdn,
+    sync_links_cdn_batch,
+    update_links_batch,
 )
+from .utils import get_site_info
+
+link_router = APIRouter()
 
 
-async def handle_link_sync(link_id, url: str | bytes):
-    """
-    处理链接同步
-    :param url: url地址或者file对象
-    :param link_id: 链接id（存储于数据库中）
-    :return:
-    """
-    data = await Site.first()
-    print(data.cdn_img_token)
-    if not data.cdn_img_token:
-        raise HTTPException(status_code=400, detail='未配置图床token')
-        # return BaseApiOut(code=400, message='未配置图床token')
-    spider = CdnImg(data.cdn_img_token)
-    # 上传图片
-    cdn_data = await spider.upload_img(url)
-    # 如果当前link_id为空，表示新建链接
-    if not link_id:
-        return cdn_data
-    # 通过id查找当前链接
-    link_model = await Links.find_one(id=link_id)
-    # 删除以前连接存在的图片
-    if link_model.cdn_img_id:
-        await spider.delete_img(link_model.cdn_img_id)
-    # 更新当前重新上传的cdn链接（防止有人上传后不保存）
-    link_model.update_from_dict({
-        'cdn_img_id': cdn_data.get('id'),
-        'icon': cdn_data.get('url'),
-    })
-    await link_model.save()
-    return cdn_data
+@link_router.post("/list", response_model=BaseApiOut[Page[LinkSchemaList]])
+async def handle_link_list(
+    filters: FilterSchemaList,
+    params: Params = Depends(),
+    order_by: str = "-create_time",
+    user: User = Depends(is_login),
+):
+    queryset = Links.filter()
+    item = filters.model_dump(exclude_unset=True)
+    menus = item.pop("menus", None)
+    keyword = item.pop("keyword", None)
+    if menus:
+        has_uncategorized = 0 in menus
+        real_menus = [m for m in menus if m != 0]
+        if has_uncategorized and not real_menus:
+            queryset = queryset.filter(menus__id__isnull=True)
+        elif has_uncategorized and real_menus:
+            queryset = queryset.filter(Q(menus__id__isnull=True) | Q(menus__in=real_menus)).distinct()
+        else:
+            queryset = queryset.filter(menus__in=menus)
+    if not user:
+        queryset = queryset.filter(is_vip=False)
+    queryset = queryset.order_by(*parse_order_by(order_by))
+    # Keyword: OR search across title, desc, href
+    if keyword:
+        queryset = queryset.filter(
+            Q(title__icontains=keyword) | Q(desc__icontains=keyword) | Q(href__icontains=keyword)
+        )
+    search_item = build_link_search_filters(item)
+    queryset = queryset.filter(**search_item).prefetch_related("menus")
+    data = await paginate(queryset, params, True)
+    return BaseApiOut(data=data)
 
 
-@link_router.post('/sync_cdn')
-async def handle_sync_cdn(link_id=None, url: str = ''):
-    cdn_data = await handle_link_sync(link_id, url)
+@link_router.get("/read/{item_id}", response_model=BaseApiOut[LinkSchemaList])
+async def handle_link_read(item_id: str):
+    item = await Links.filter(id=item_id).prefetch_related("menus").first()
+    if not item:
+        return not_found("链接")
+    data = LinkSchemaList.model_validate(item, from_attributes=True)
+    return BaseApiOut(data=data)
+
+
+@link_router.post("/create", response_model=BaseApiOut[CreateMenuSchema], dependencies=[Depends(get_current_user)])
+async def handle_link_create(item: CreateMenuSchema):
+    await clear_link_cache()
+    payload = item.model_dump(exclude_unset=True, exclude={"menus"})
+    link = await Links.create(**payload)
+    await attach_link_menus(link, item.menus)
+    return BaseApiOut(data=item)
+
+
+@link_router.get("/titles", dependencies=[Depends(get_current_user)])
+async def handle_link_titles():
+    """返回所有链接标题列表（用于导入时重复检测）"""
+    titles = await Links.all().values_list("title", flat=True)
+    return BaseApiOut(data=titles)
+
+
+@link_router.post("/create/all", response_model=BaseApiOut, dependencies=[Depends(get_current_user)])
+async def handle_link_create_all(items: list[CreateMenuSchema]):
+    await clear_link_cache()
+    await create_links_batch(items)
+    return BaseApiOut(message="批量创建成功")
+
+
+def _normalize_menu_title(entry) -> str:
+    """Extract menu title from str or dict/MenuImportInfo."""
+    if isinstance(entry, str):
+        return entry
+    if isinstance(entry, dict):
+        return entry.get("title", "")
+    return getattr(entry, "title", "")
+
+
+async def _create_menus_from_import(create_menus: list) -> None:
+    """Two-pass menu creation preserving hierarchy, icons, and colors."""
+    # 预加载所有已有菜单标题
+    existing_titles = set(await Menu.all().values_list("title", flat=True))
+
+    # Pass 1: Batch create all menus (without parent)
+    menus_to_create = []
+    for entry in create_menus:
+        if isinstance(entry, str):
+            title, icon, color = entry, "ic:round-menu", None
+        else:
+            info = entry if isinstance(entry, dict) else entry.model_dump() if hasattr(entry, "model_dump") else {"title": str(entry)}
+            title = info.get("title", "")
+            icon = info.get("icon", "ic:round-menu")
+            color = info.get("color")
+        if not title or title in existing_titles:
+            continue
+        menus_to_create.append(Menu(title=title, icon=icon or "ic:round-menu", color=color))
+        existing_titles.add(title)
+
+    if menus_to_create:
+        await Menu.bulk_create(menus_to_create)
+
+    # Pass 2: Set parent relationships — 批量查询所有菜单构建 map
+    menu_map = {m.title: m for m in await Menu.all()}
+    for entry in create_menus:
+        if isinstance(entry, str):
+            continue
+        info = entry if isinstance(entry, dict) else entry.model_dump() if hasattr(entry, "model_dump") else {}
+        parent_title = info.get("parent_title")
+        if not parent_title:
+            continue
+        title = info.get("title", "")
+        menu = menu_map.get(title)
+        parent = menu_map.get(parent_title)
+        if menu and parent:
+            menu.parent_id = parent.id
+            await menu.save()
+
+
+@link_router.post("/import-json", dependencies=[Depends(get_current_user)])
+async def handle_link_import_json(payload: LinkImportRequest):
+    """从前端预览后的JSON数据导入链接（后台任务 + WebSocket进度推送）"""
+    if not payload.items:
+        return BaseApiOut(data={"created": 0, "skipped": 0})
+
+    from core.tasks import create_task_id, register_task, complete_task, fail_task, track_task, send_task_progress
+
+    task_id = create_task_id()
+    register_task(task_id)
+
+    async def _run_import():
+        try:
+            # Auto-create missing menus with hierarchy
+            await _create_menus_from_import(payload.create_menus)
+
+            # Pre-load menu map and existing titles for batch duplicate check
+            all_menus = await Menu.all()
+            menu_map = {m.title: m for m in all_menus}
+
+            existing_links = await Links.filter(
+                title__in=[item.title for item in payload.items if item.title]
+            ).values_list("title", flat=True)
+            existing_titles = set(existing_links)
+
+            total = len(payload.items)
+
+            # Separate items into create vs skip, record menu associations
+            links_to_create = []
+            link_menu_map = []  # parallel list: menu titles per link
+            skipped = 0
+
+            for item in payload.items:
+                if not item.title or item.title in existing_titles:
+                    skipped += 1
+                else:
+                    links_to_create.append(Links(
+                        title=item.title,
+                        href=item.href,
+                        icon=item.icon,
+                        desc=item.desc,
+                        color=item.color,
+                        is_self=item.is_self,
+                        is_vip=item.is_vip,
+                        order=item.order,
+                        cdn_img_id=item.cdn_img_id,
+                        status=item.status,
+                    ))
+                    link_menu_map.append([_normalize_menu_title(m) for m in item.menus])
+                    existing_titles.add(item.title)
+
+            created = len(links_to_create)
+
+            # Batch create links in chunks
+            BATCH_SIZE = 100
+            async with in_transaction():
+                for start in range(0, len(links_to_create), BATCH_SIZE):
+                    batch = links_to_create[start:start + BATCH_SIZE]
+                    await Links.bulk_create(batch)
+                    progress = min(start + BATCH_SIZE, len(links_to_create))
+                    await send_task_progress(task_id, {
+                        "current": skipped + progress,
+                        "total": total,
+                        "created": progress,
+                        "skipped": skipped,
+                    })
+
+            # Set M2M relationships: query back created links by title
+            if created > 0:
+                created_titles = [l.title for l in links_to_create]
+                created_links = await Links.filter(title__in=created_titles)
+                link_by_title = {l.title: l for l in created_links}
+                for link_obj, menu_titles in zip(links_to_create, link_menu_map):
+                    db_link = link_by_title.get(link_obj.title)
+                    if not db_link:
+                        continue
+                    menus_to_add = [menu_map[t] for t in menu_titles if t in menu_map]
+                    if menus_to_add:
+                        await db_link.menus.add(*menus_to_add)
+
+            await clear_link_cache()
+            await complete_task(task_id, {"created": created, "skipped": skipped})
+        except Exception as e:
+            await fail_task(task_id, str(e))
+
+    track_task(_run_import())
+
+    return BaseApiOut(data={"task_id": task_id})
+
+
+@link_router.put("/{item_id}", response_model=BaseApiOut, dependencies=[Depends(get_current_user)])
+async def handle_link_update(item_id: str, item: CreateMenuSchema):
+    await clear_link_cache()
+    link = await Links.get_or_none(id=item_id)
+    if not link:
+        return not_found("链接")
+    payload = item.model_dump(exclude_unset=True, exclude={"menus"})
+    if payload:
+        await Links.filter(id=item_id).update(**payload)
+    if isinstance(item.menus, list):
+        await link.menus.clear()
+        await attach_link_menus(link, item.menus)
+    return BaseApiOut()
+
+
+@link_router.put("/update/all", response_model=BaseApiOut, dependencies=[Depends(get_current_user)])
+async def handle_link_update_all(items: list[LinkUpdateAllSchema]):
+    await clear_link_cache()
+    await update_links_batch(items)
+    return BaseApiOut(message="批量更新成功")
+
+
+@link_router.delete("/{item_ids}", response_model=BaseApiOut, dependencies=[Depends(get_current_user)])
+async def handle_link_delete(item_ids: str):
+    ids = item_ids.split(",")
+    await clear_link_cache()
+    data = await Links.filter(id__in=ids).delete()
+    return BaseApiOut(data=data)
+
+
+@link_router.delete("/delete/all", response_model=BaseApiOut, dependencies=[Depends(get_current_super_user)])
+async def handle_link_delete_all():
+    await clear_link_cache()
+    await Links.all().delete()
+    return BaseApiOut(message="删除所有数据成功")
+
+
+@link_router.post("/sync_cdn", dependencies=[Depends(get_current_user)])
+async def handle_sync_cdn(link_id=None, url: str = ""):
+    cdn_data = await sync_link_cdn(link_id, url)
     if not cdn_data:
-        return JSONResponse(status_code=400, content='同步CDN失败')
+        return BaseApiOut(code=400, message="同步CDN失败")
     return BaseApiOut(data=cdn_data)
-    pass
 
 
-@link_router.post('/sync_cdn_file', description='同步上传的文件')
+@link_router.post("/sync_cdn_file", description="同步上传的文件", dependencies=[Depends(get_current_user)])
 async def handle_sync_cdn_file(link_id=None, file: UploadFile = File(...)):
-    cdn_data = await handle_link_sync(link_id, file.file.read())
+    cdn_data = await sync_link_cdn(link_id, await file.read())
     if not cdn_data:
-        return JSONResponse(status_code=400, content='同步CDN失败')
+        return BaseApiOut(code=400, message="同步CDN失败")
     return BaseApiOut(data=cdn_data)
-    pass
 
 
-@link_router.post('/siteinfo')
+@link_router.post("/siteinfo", dependencies=[Depends(get_current_user)])
 async def handle_siteinfo(url: str):
     data = await get_site_info(url)
     if not data:
-        raise HTTPException(status_code=400, detail='获取信息失败')
+        return BaseApiOut(code=400, message="获取信息失败，请检查链接是否可访问")
     return BaseApiOut(data=data)
+
+
+@link_router.post("/sync_cdn_batch", dependencies=[Depends(get_current_user)])
+async def handle_sync_cdn_batch(link_ids: list[int]):
+    """批量同步选中链接的图标到CDN（后台任务）"""
+    if not link_ids:
+        raise HTTPException(status_code=400, detail="请选择要同步的链接")
+
+    from core.tasks import create_task_id, register_task, complete_task, fail_task, track_task
+
+    task_id = create_task_id()
+    register_task(task_id)
+
+    async def _run_sync():
+        try:
+            result = await sync_links_cdn_batch(link_ids)
+            await complete_task(task_id, result)
+        except HTTPException as e:
+            await fail_task(task_id, e.detail)
+        except Exception as e:
+            await fail_task(task_id, str(e))
+
+    track_task(_run_sync())
+
+    return BaseApiOut(data={"task_id": task_id})
+
+
+@link_router.get("/export", dependencies=[Depends(get_current_user)])
+async def handle_link_export():
+    """导出所有链接数据为JSON（菜单包含层级信息）"""
+    links = await Links.all().order_by("order").prefetch_related("menus")
+
+    # Batch-load all referenced menus with parent info
+    menu_ids = set()
+    for link in links:
+        for m in link.menus:
+            menu_ids.add(m.id)
+    menus_with_parent = await Menu.filter(id__in=list(menu_ids)).select_related("parent") if menu_ids else []
+    menu_map = {m.id: m for m in menus_with_parent}
+
+    data = []
+    for link in links:
+        menu_list = []
+        for m in link.menus:
+            full = menu_map.get(m.id, m)
+            menu_list.append({
+                "title": full.title,
+                "icon": full.icon,
+                "color": full.color,
+                "parent_title": full.parent.title if getattr(full, "parent", None) else None,
+            })
+        data.append({
+            "title": link.title,
+            "href": link.href,
+            "icon": link.icon,
+            "desc": link.desc,
+            "color": link.color,
+            "is_self": link.is_self,
+            "is_vip": link.is_vip,
+            "order": link.order,
+            "cdn_img_id": link.cdn_img_id,
+            "status": link.status,
+            "menus": menu_list,
+        })
+    content = json.dumps(data, ensure_ascii=False, indent=2)
+    return Response(
+        content=content,
+        media_type="application/json",
+        headers={"Content-Disposition": "attachment; filename=links.json"},
+    )
+
+
+@link_router.post("/import", dependencies=[Depends(get_current_user)])
+async def handle_link_import(file: UploadFile = File(...)):
+    """从JSON文件导入链接数据（后台任务 + WebSocket进度推送）"""
+    content = await file.read()
+    try:
+        items = json.loads(content)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="JSON格式错误")
+    if not isinstance(items, list):
+        raise HTTPException(status_code=400, detail="数据格式错误，应为数组")
+
+    from core.tasks import create_task_id, register_task, complete_task, fail_task, track_task, send_task_progress
+
+    task_id = create_task_id()
+    register_task(task_id)
+
+    async def _run_import():
+        try:
+            # Auto-create missing menus with hierarchy (new dict-format entries)
+            all_menu_entries = []
+            for item in items:
+                for m in (item.get("menus") or []):
+                    if isinstance(m, dict):
+                        all_menu_entries.append(m)
+            if all_menu_entries:
+                await _create_menus_from_import(all_menu_entries)
+
+            # Pre-load menu map and existing titles for batch duplicate check
+            all_menus = await Menu.all()
+            menu_map = {m.title: m for m in all_menus}
+
+            all_titles = [item.get("title") for item in items if item.get("title")]
+            existing_links = await Links.filter(title__in=all_titles).values_list("title", flat=True)
+            existing_titles = set(existing_links)
+
+            total = len(items)
+
+            # Separate items into create vs skip, record menu associations
+            links_to_create = []
+            link_menu_map = []
+            skipped = 0
+
+            for item in items:
+                title = item.get("title")
+                if not title or title in existing_titles:
+                    skipped += 1
+                else:
+                    links_to_create.append(Links(
+                        title=title,
+                        href=item.get("href", ""),
+                        icon=item.get("icon"),
+                        desc=item.get("desc"),
+                        color=item.get("color"),
+                        is_self=item.get("is_self", False),
+                        is_vip=item.get("is_vip", False),
+                        order=item.get("order", 0),
+                        cdn_img_id=item.get("cdn_img_id"),
+                        status=item.get("status", True),
+                    ))
+                    menu_entries = item.get("menus") or []
+                    link_menu_map.append([_normalize_menu_title(m) for m in menu_entries])
+                    existing_titles.add(title)
+
+            created = len(links_to_create)
+
+            # Batch create links in chunks
+            BATCH_SIZE = 100
+            for start in range(0, len(links_to_create), BATCH_SIZE):
+                batch = links_to_create[start:start + BATCH_SIZE]
+                await Links.bulk_create(batch)
+                progress = min(start + BATCH_SIZE, len(links_to_create))
+                await send_task_progress(task_id, {
+                    "current": skipped + progress,
+                    "total": total,
+                    "created": progress,
+                    "skipped": skipped,
+                })
+
+            # Set M2M relationships: query back created links by title
+            if created > 0:
+                created_titles = [l.title for l in links_to_create]
+                created_links = await Links.filter(title__in=created_titles)
+                link_by_title = {l.title: l for l in created_links}
+                for link_obj, menu_titles in zip(links_to_create, link_menu_map):
+                    db_link = link_by_title.get(link_obj.title)
+                    if not db_link:
+                        continue
+                    menus_to_add = [menu_map[t] for t in menu_titles if t in menu_map]
+                    if menus_to_add:
+                        await db_link.menus.add(*menus_to_add)
+
+            await clear_link_cache()
+            await complete_task(task_id, {"created": created, "skipped": skipped})
+        except Exception as e:
+            await fail_task(task_id, str(e))
+
+    track_task(_run_import())
+    return BaseApiOut(data={"task_id": task_id})

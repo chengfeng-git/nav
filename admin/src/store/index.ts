@@ -1,6 +1,12 @@
-import { useUserStore } from "./modules/user";
-import { useAppStore } from "./modules/app";
-import { useTagsViewStore } from "./modules/tagsview";
-import {useMenuStore} from "./modules/menu";
+import type { App } from 'vue';
+import { createPinia } from 'pinia';
+import { resetSetupStore } from './plugins';
 
-export { useUserStore, useAppStore, useTagsViewStore,useMenuStore };
+/** Setup Vue store plugin pinia */
+export function setupStore(app: App) {
+  const store = createPinia();
+
+  store.use(resetSetupStore);
+
+  app.use(store);
+}

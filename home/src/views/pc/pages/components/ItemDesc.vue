@@ -1,24 +1,28 @@
 <script setup lang="ts">
 import MIcon from "@/components/MIcon.vue";
-import { PropType, ref } from "vue";
+import { PropType } from "vue";
 import { LinkSchemaList } from "@/api/links/types";
-import { useElementSize } from "@vueuse/core";
 
-defineProps({
+const props = defineProps({
   item: {
     type: Object as PropType<LinkSchemaList>,
     required: true,
   },
 });
-const itemRef = ref<HTMLElement>();
-const { width } = useElementSize(itemRef);
+
+const emit = defineEmits<{
+  (e: "contextmenu", event: MouseEvent, item: LinkSchemaList): void;
+}>();
+
+function handleContextMenu(event: MouseEvent) {
+  emit("contextmenu", event, props.item);
+}
 </script>
 
 <template>
-  <div class="relative w-full" v-if="item?.status">
+  <div class="relative w-full" v-if="item?.status" @contextmenu="handleContextMenu">
     <el-tooltip :disabled="!item?.desc" :hide-after="200" :enterable="false">
       <a
-        ref="itemRef"
         :href="item?.href"
         :target="item?.is_self ? '_self' : '_blank'"
         class="box space-x-2"
@@ -40,7 +44,7 @@ const { width } = useElementSize(itemRef);
         </div>
       </a>
       <template #content>
-        <div :style="{ maxWidth: width + 'px' }">{{ item.desc }}</div>
+        <div style="max-width: 300px">{{ item.desc }}</div>
       </template>
     </el-tooltip>
   </div>
@@ -55,18 +59,23 @@ const { width } = useElementSize(itemRef);
   text-decoration: none;
   color: inherit;
   cursor: pointer;
-  background-color: white;
-  padding: 8px;
+  background-color: var(--nav-card-bg);
+  padding: var(--space-3, 12px);
   border-radius: 8px;
   transition:
     box-shadow 0.3s,
-    transform 0.3s,
+    transform 0.15s,
     color 0.3s;
 
   &:hover {
-    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1); /* 添加底部阴影 */
-    transform: translateY(-2px); /* 向上移动一点的动画效果 */
-    color: #cc2b2b;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.04), 0 8px 16px rgba(0, 0, 0, 0.08);
+    transform: translateY(-2px);
+    color: var(--el-color-primary);
+  }
+
+  &:active {
+    transform: scale(0.98);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
   }
 
   & > .left-icon {
@@ -100,15 +109,13 @@ const { width } = useElementSize(itemRef);
       display: -webkit-box;
       -webkit-box-orient: vertical;
       -webkit-line-clamp: 2;
-      --tw-text-opacity: 1;
-      color: rgb(156 163 175 / var(--tw-text-opacity));
+      color: var(--nav-text-secondary);
       font-size: 0.75rem;
     }
   }
 
-  //pc样式
   @media screen and (min-width: 769px) {
-    padding: 16px;
+    padding: var(--space-4, 16px);
     & > .right-content {
       padding-left: 4px;
     }

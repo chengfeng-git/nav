@@ -5,20 +5,47 @@ import MLogo from "@/components/MLogo.vue";
 import { useAppStore } from "@/store/app";
 import MFooter from "./footer/index.vue";
 import AppMain from "./app-main/AppMain.vue";
-import { computed, onMounted } from "vue";
+import { computed, onMounted, provide, ref } from "vue";
 import { isMobile } from "@/utils/window";
 import { useSiteStore } from "@/store/site";
+import { useBookmarkStore } from "@/store/bookmark";
 import { useTitle } from "@vueuse/core";
-import MSearch from "@/components/m-search/index.vue";
+import SearchDialog from "@/components/m-search/SearchDialog.vue";
 import MMask from "@/components/m-mask.vue";
 import style from "@/styles/variables.module.scss";
+import { useScrollProgress } from "@/composables/useScrollProgress";
 
 const appStore = useAppStore();
 const siteStore = useSiteStore();
+const bookmarkStore = useBookmarkStore();
+const searchDialogRef = ref<InstanceType<typeof SearchDialog> | null>(null);
+
+/** 从旧版 localMenu 格式迁移书签数据 */
+function migrateOldBookmarks() {
+  try {
+    const raw = localStorage.getItem("menu");
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    if (parsed?.localMenu?.links?.length > 0 && bookmarkStore.links.length === 0) {
+      bookmarkStore.migrateFromLegacy(parsed.localMenu.links);
+    }
+  } catch {
+    // 迁移失败不影响正常使用
+  }
+}
+
+function openSearch() {
+  searchDialogRef.value?.open();
+}
+
+// Provide openSearch to child components (footer tool group)
+provide("openSearch", openSearch);
+
 onMounted(async () => {
   if (isMobile.value) {
     appStore.isCollapse = true;
   }
+  migrateOldBookmarks();
   await siteStore.getSiteInfo();
   useTitle(siteStore.siteInfo.title);
 });
@@ -29,29 +56,39 @@ const isMask = computed(() => {
 
 // 左侧菜单宽带
 const menuWidth = computed(() => {
-  return appStore.isCollapse ? style.hideSideBarWidth : style.sideBarWidth;
+  if (!appStore.isCollapse) return style.sideBarWidth;
+  return isMobile.value ? style.hideSideBarWidth : style.sidebarHideWidth;
 });
+
+// 滚动进度条
+const { scrollProgress, scrollPercent } = useScrollProgress();
+
+// Provide scrollProgress to child components (footer uses it)
+provide("scrollProgress", scrollProgress);
 </script>
 
 <template>
   <div class="common-layout">
     <!--    左侧菜单-->
-    <div class="left-container">
+    <div class="left-container" role="navigation" aria-label="分类菜单">
       <el-aside class="menu-side">
-        <m-logo class="bg-white" />
+        <m-logo :style="{ backgroundColor: 'var(--nav-logo-bg)' }" />
         <m-side-menu />
       </el-aside>
     </div>
     <!--    右侧内容-->
-    <div class="right-container">
-      <m-navbar class="navbar" />
-      <m-search class="w-[78%] md:w-[50%]" font-size="30px" />
+    <div class="right-container" role="main">
+      <div class="scroll-progress" role="progressbar" :aria-valuenow="Math.round(scrollPercent)" aria-valuemin="0" aria-valuemax="100" :style="{ width: scrollPercent + '%' }" />
+      <m-navbar class="navbar" @open-search="openSearch" />
       <div class="p-2 md:p-6">
         <app-main />
         <m-footer />
       </div>
     </div>
     <m-mask :is-mask="isMask" />
+
+    <!-- 搜索对话框 -->
+    <search-dialog ref="searchDialogRef" />
   </div>
 </template>
 
@@ -60,22 +97,24 @@ const menuWidth = computed(() => {
 
 .common-layout {
   display: flex;
-  background-color: #{$bg};
+  background-color: var(--nav-bg);
 
   .left-container {
     height: 100vh;
     z-index: 60;
-
-    ul {
-      height: calc(100% - #{$navHeaderHeight});
-      border-right: none;
-    }
+    overflow: hidden;
+    flex-shrink: 0;
 
     .menu-side {
       position: relative;
+      display: flex;
+      flex-direction: column;
       height: 100%;
       width: v-bind(menuWidth);
-      transition: width #{$sideBarDuration} ease;
+      min-width: v-bind(menuWidth);
+      transition: width #{$sideBarDuration} cubic-bezier(0.25, 0.46, 0.45, 0.94),
+                  min-width #{$sideBarDuration} cubic-bezier(0.25, 0.46, 0.45, 0.94);
+      overflow: hidden;
       @media screen and (max-width: 768px) {
         transition-duration: 0.25s;
       }
@@ -108,8 +147,8 @@ const menuWidth = computed(() => {
         background-color 0.3s;
       box-shadow: none;
       border-bottom-width: 1px;
-      border-bottom-color: rgba(0, 0, 0, 0.06);
-      background: rgba(255, 255, 255, 1);
+      border-bottom-color: var(--nav-border);
+      background: var(--nav-navbar-bg);
     }
   }
 }

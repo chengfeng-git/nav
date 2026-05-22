@@ -1,15 +1,12 @@
 from datetime import timedelta
 
 from core.http_status import HttpStatus
-from fastapi import Security, HTTPException
+from fastapi import Depends, Security, HTTPException
 from fastapi_jwt import JwtAccessBearerCookie, JwtRefreshBearer, JwtAuthorizationCredentials
+import bcrypt
 
 from settings import settings
 from models import User
-
-from passlib.context import CryptContext
-
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 access_security = JwtAccessBearerCookie(
     secret_key=settings.SECRET_KEY,
@@ -32,7 +29,9 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     :param hashed_password: hash后的密码
     :return:
     """
-    return pwd_context.verify(plain_password, hashed_password)
+    plain_password_bytes = plain_password.encode("utf-8")
+    hashed_password_bytes = hashed_password.encode("utf-8")
+    return bcrypt.checkpw(plain_password_bytes, hashed_password_bytes)
 
 
 def get_password_hash(password: str) -> str:
@@ -41,18 +40,28 @@ def get_password_hash(password: str) -> str:
     :param password:
     :return:
     """
-    return pwd_context.hash(password)
+    password_bytes = password.encode("utf-8")
+    hashed_password = bcrypt.hashpw(password_bytes, bcrypt.gensalt())
+    return hashed_password.decode("utf-8")
 
 
 async def get_current_user(credentials: JwtAuthorizationCredentials = Security(access_security)):
     try:
         username = credentials['username']
-    except TypeError:
+    except (TypeError, KeyError):
         raise HTTPException(status_code=HttpStatus.HTTP_400_BAD_REQUEST, detail='非法请求，请重新登录')
     user = await User.find_by_username(username)
     # 当前用户是否存在
     if not user:
         raise HTTPException(status_code=HttpStatus.HTTP_419_USER_EXCEPT, detail='用户不存在，请检查是否登录')
+    if not user.status:
+        raise HTTPException(status_code=HttpStatus.HTTP_419_USER_EXCEPT, detail='用户已禁用，请联系管理员')
+    return user
+
+
+async def get_current_super_user(user: User = Depends(get_current_user)):
+    if not user.is_super:
+        raise HTTPException(status_code=HttpStatus.HTTP_407_AUTH_EXCEPT, detail='权限不足，需管理员权限')
     return user
 
 
@@ -61,4 +70,7 @@ async def is_login(credentials: JwtAuthorizationCredentials = Security(access_se
         username = credentials['username']
     except TypeError:
         return False
-    return await User.get_or_none(username=username)
+    user = await User.get_or_none(username=username)
+    if user and not user.status:
+        return False
+    return user

@@ -2,6 +2,10 @@ import { ConfigEnv, defineConfig, loadEnv, UserConfigExport } from "vite";
 import vue from "@vitejs/plugin-vue";
 import vueJsx from "@vitejs/plugin-vue-jsx";
 import path from "path";
+import AutoImport from "unplugin-auto-import/vite";
+import Components from "unplugin-vue-components/vite";
+import { ElementPlusResolver } from "unplugin-vue-components/resolvers";
+import { compression } from "vite-plugin-compression2";
 
 // https://vitejs.dev/config/
 export default (configEnv: ConfigEnv): UserConfigExport => {
@@ -9,7 +13,7 @@ export default (configEnv: ConfigEnv): UserConfigExport => {
   const { VITE_PUBLIC_PATH, VITE_BASE_API } = viteEnv;
   return defineConfig({
     define: {
-      __VUE_PROD_HYDRATION_MISMATCH_DETAILS__: "true",
+      __VUE_PROD_HYDRATION_MISMATCH_DETAILS__: "false",
     },
     base: VITE_PUBLIC_PATH,
     resolve: {
@@ -34,6 +38,26 @@ export default (configEnv: ConfigEnv): UserConfigExport => {
         },
       },
     },
-    plugins: [vue(), vueJsx()],
+    plugins: [
+      vue(),
+      vueJsx(),
+      AutoImport({
+        resolvers: [ElementPlusResolver()],
+      }),
+      Components({
+        resolvers: [ElementPlusResolver()],
+      }),
+      compression({ algorithm: "gzip", threshold: 1024 }),
+    ],
+    build: {
+      rollupOptions: {
+        output: {
+          manualChunks: {
+            'vendor-vue': ['vue', 'vue-router', 'pinia'],
+            'vendor-element': ['element-plus'],
+          },
+        },
+      },
+    },
   });
 };

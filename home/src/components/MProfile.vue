@@ -13,7 +13,7 @@ const userStore = useUserStore();
 </script>
 
 <template>
-  <el-dropdown v-if="userStore.token?.access_token">
+  <el-dropdown v-if="userStore.isAdminAuthorized">
     <span class="flex items-center gap-x-1">
       <m-icon
         :size="26"
@@ -29,7 +29,7 @@ const userStore = useUserStore();
     <template #dropdown>
       <el-dropdown-menu class="divide-2 divide-gray-300">
         <el-dropdown-item
-          ><a href="/admin" target="_blank">后台管理</a></el-dropdown-item
+          ><a href="/admin/">后台管理</a></el-dropdown-item
         >
         <el-dropdown-item divided @click="userStore.logout"
           >退出登录

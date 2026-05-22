@@ -2,7 +2,7 @@ import { defineStore } from "pinia";
 import { getRandImg } from "@/api/spider";
 
 /**
- * 记录主题相关信息
+ * 记录应用相关信息
  */
 export const useAppStore = defineStore("app", {
   state: () => ({
@@ -12,7 +12,6 @@ export const useAppStore = defineStore("app", {
   }),
   actions: {
     toggleSlide() {
-      // debugger;
       this.isCollapse = !this.isCollapse;
     },
     async getRandomBg() {

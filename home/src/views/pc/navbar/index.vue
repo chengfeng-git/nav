@@ -6,11 +6,33 @@ import MYiyan from "@/components/MYiyan.vue";
 import { useSiteStore } from "@/store/site";
 import { useAppStore } from "@/store/app";
 import MHot from "@/components/hot/index.vue";
+import { isMobile } from "@/utils/window";
+import { useTheme } from "@/composables/useTheme";
+import { computed } from "vue";
+
 defineOptions({
   name: "MNavbar",
 });
+
+const emit = defineEmits<{
+  (e: "open-search"): void;
+}>();
+
 const appStore = useAppStore();
 const siteStore = useSiteStore();
+const { themeMode, toggleTheme } = useTheme();
+
+const themeIcon = computed(() => {
+  if (themeMode.value === "dark") return "mdi:weather-night";
+  if (themeMode.value === "light") return "mdi:white-balance-sunny";
+  return "mdi:theme-light-dark";
+});
+
+const themeTitle = computed(() => {
+  if (themeMode.value === "dark") return "暗色模式（点击切换）";
+  if (themeMode.value === "light") return "亮色模式（点击切换）";
+  return "跟随系统（点击切换）";
+});
 </script>
 
 <template>
@@ -21,7 +43,7 @@ const siteStore = useSiteStore();
       <m-icon
         size="45"
         @click.stop="appStore.toggleSlide()"
-        class="cursor-pointer hover:text-sky-800 transition-colors"
+        class="cursor-pointer hover:text-sky-800 dark:hover:text-sky-300 transition-colors"
         icon="ph:list-fill"
       />
       <!--      今日热榜-->
@@ -32,9 +54,24 @@ const siteStore = useSiteStore();
 
     <div class="nav-right-container">
       <m-yiyan v-if="siteStore.siteInfo?.yiyan" />
-      <!--      占位，防止个人中心到最前面-->
       <div></div>
-      <m-profile class="mr-1" />
+      <div class="flex items-center gap-x-2">
+        <m-icon
+          :icon="themeIcon"
+          :size="22"
+          class="cursor-pointer hover:text-sky-800 dark:hover:text-sky-300 transition-colors"
+          :title="themeTitle"
+          @click="toggleTheme"
+        />
+        <m-icon
+          v-if="isMobile"
+          icon="mingcute:search-line"
+          :size="24"
+          class="cursor-pointer hover:text-sky-800 dark:hover:text-sky-300 transition-colors"
+          @click="emit('open-search')"
+        />
+        <m-profile class="mr-1" />
+      </div>
     </div>
   </div>
 </template>

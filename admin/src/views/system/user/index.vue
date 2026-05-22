@@ -1,51 +1,276 @@
-<template>
-  <m-table :crud-options="crudOptions" :model="userModel"></m-table>
-</template>
+<script setup lang="ts">
+import { computed, h, nextTick, onBeforeUnmount, reactive, ref } from 'vue';
+import { NButton, NDataTable, NForm, NFormItem, NInput, NModal, NPagination, NPopconfirm, NSelect, NSpace, NSwitch, NTag, type DataTableColumns, type FormInst, type FormRules } from 'naive-ui';
+import { Icon } from '@iconify/vue';
+import { useDraggable } from 'vue-draggable-plus';
+import { fetchUserList, fetchUserCreate, fetchUserUpdate, fetchUserDelete, fetchUserBatchUpdate } from '@/service/api';
 
-<script lang="ts" setup>
-import MTable from "@/components/table/index.vue";
-import { CrudOptions } from "@fast-crud/fast-crud";
-import userModel from "@/api/system/user";
+const loading = ref(false);
+const tableData = ref<Api.SystemUser.UserItem[]>([]);
+const pagination = reactive({ page: 1, pageSize: 20, total: 0 });
+const checkedRowKeys = ref<number[]>([]);
 
-const crudOptions: CrudOptions = {
-  columns: {
-    username: {
-      title: "用户名",
-      type: "text",
-      search: { show: true, autoSearchTrigger: "change" }, // 开启查询,
-      addForm: {
-        rules: [{ required: true, message: "用户名不能为空" }],
-      },
-      column: {
-        sortable: "custom",
-      },
-    },
-    password: {
-      title: "密码",
-      type: "text",
-      key: "password",
-      column: {
-        show: false,
-      },
-      form: {
-        rules: [{ min: 5, max: 18, message: "密码必须为5-18位之间" }],
-        component: {
-          showPassword: true,
-        },
-        helper: "填写则修改密码",
-      },
-    },
-    nickname: {
-      title: "昵称",
-      type: "text",
-      // search: { show: true }, // 开启查询
-      form: {
-        rules: [{ max: 50, message: "最大50个字符" }],
-      },
-      column: {
-        sorter: true,
-      },
-    },
+const filters = reactive<Api.SystemUser.UserFilter>({ username: '', status: null });
+const showDialog = ref(false);
+const isEdit = ref(false);
+const editId = ref<number | null>(null);
+
+const formModel = reactive({
+  username: '',
+  password: '',
+  nickname: '',
+  status: false as boolean,
+  is_super: false as boolean
+});
+
+const formRef = ref<FormInst | null>(null);
+const formRules = computed<FormRules>(() => ({
+  username: { required: true, message: '请输入用户名', trigger: 'blur' },
+  password: isEdit.value ? undefined : { required: true, message: '请输入密码', trigger: 'blur' }
+}));
+
+const statusOptions = [
+  { label: '全部', value: null },
+  { label: '启用', value: true },
+  { label: '禁用', value: false }
+];
+
+// Drag sort
+const tableRef = ref<InstanceType<typeof NDataTable> | null>(null);
+
+const sortable = useDraggable<Api.SystemUser.UserItem>(ref(undefined), tableData, {
+  animation: 150,
+  handle: '.drag-handle',
+  immediate: false,
+  onEnd: handleDragEnd
+});
+
+function initSortable() {
+  nextTick(() => {
+    const el = tableRef.value?.$el as HTMLElement | undefined;
+    if (!el) return;
+    const tbody = el.querySelector('tbody') as HTMLElement | null;
+    if (tbody) {
+      try { sortable.destroy(); } catch { /* ignore */ }
+      sortable.start(tbody);
+    }
+  });
+}
+
+onBeforeUnmount(() => {
+  try { sortable.destroy(); } catch { /* ignore */ }
+});
+
+async function handleDragEnd() {
+  const updates = tableData.value.map((item, index) => ({
+    id: item.id,
+    order: index
+  }));
+  tableData.value.forEach((item, index) => {
+    item.order = index;
+  });
+  await fetchUserBatchUpdate(updates);
+  window.$message?.success('排序已保存');
+}
+
+async function loadData() {
+  loading.value = true;
+  const filterData: any = {};
+  if (filters.username) filterData.username = filters.username;
+  if (filters.status !== null && filters.status !== undefined) filterData.status = filters.status;
+
+  const { data, error } = await fetchUserList(
+    { page: pagination.page, size: pagination.pageSize },
+    filterData
+  );
+  if (!error && data) {
+    tableData.value = data.items;
+    pagination.total = data.total;
+    initSortable();
+  }
+  loading.value = false;
+}
+
+function handleSearch() { pagination.page = 1; loadData(); }
+function handleReset() { filters.username = ''; filters.status = null; handleSearch(); }
+function handlePageChange(page: number) { pagination.page = page; loadData(); }
+function handlePageSizeChange(size: number) { pagination.pageSize = size; pagination.page = 1; loadData(); }
+
+function handleAdd() {
+  isEdit.value = false;
+  editId.value = null;
+  Object.assign(formModel, { username: '', password: '', nickname: '', status: false, is_super: false });
+  showDialog.value = true;
+}
+
+function handleEdit(row: Api.SystemUser.UserItem) {
+  isEdit.value = true;
+  editId.value = row.id;
+  Object.assign(formModel, {
+    username: row.username,
+    password: '',
+    nickname: row.nickname || '',
+    status: row.status,
+    is_super: row.is_super
+  });
+  showDialog.value = true;
+}
+
+async function handleSave() {
+  try {
+    await formRef.value?.validate();
+  } catch {
+    return;
+  }
+  if (isEdit.value && editId.value) {
+    const payload: Api.SystemUser.UserUpdate = {
+      username: formModel.username,
+      nickname: formModel.nickname,
+      status: formModel.status,
+      is_super: formModel.is_super
+    };
+    if (formModel.password) payload.password = formModel.password;
+    await fetchUserUpdate(editId.value, payload);
+  } else {
+    await fetchUserCreate({
+      username: formModel.username,
+      password: formModel.password,
+      nickname: formModel.nickname,
+      status: formModel.status,
+      is_super: formModel.is_super
+    });
+  }
+  showDialog.value = false;
+  loadData();
+}
+
+async function handleDelete(ids: string) { await fetchUserDelete(ids); loadData(); }
+
+async function handleBatchDelete() {
+  if (!checkedRowKeys.value.length) return;
+  await fetchUserDelete(checkedRowKeys.value.join(','));
+  checkedRowKeys.value = [];
+  loadData();
+}
+
+const columns = computed<DataTableColumns<Api.SystemUser.UserItem>>(() => [
+  {
+    title: '',
+    key: 'drag',
+    width: 40,
+    render() {
+      return h('div', { class: 'drag-handle cursor-move flex-center' }, [
+        h(Icon, { icon: 'mdi:drag', width: '1.2em', height: '1.2em', class: 'text-gray-400' })
+      ]);
+    }
   },
-};
+  { type: 'selection' },
+  { title: 'ID', key: 'id', width: 60 },
+  { title: '用户名', key: 'username', width: 150 },
+  { title: '昵称', key: 'nickname', width: 150 },
+  {
+    title: '状态', key: 'status', width: 80,
+    render(row) {
+      return h(NTag, { type: row.status ? 'success' : 'error', size: 'small' }, () => row.status ? '启用' : '禁用');
+    }
+  },
+  {
+    title: '超级管理员', key: 'is_super', width: 100,
+    render(row) {
+      return h(NTag, { type: row.is_super ? 'warning' : 'default', size: 'small' }, () => row.is_super ? '是' : '否');
+    }
+  },
+  {
+    title: '操作', key: 'actions', width: 150,
+    render(row) {
+      return h(NSpace, { size: 8 }, () => [
+        h(NButton, { size: 'small', type: 'primary', onClick: () => handleEdit(row) }, () => '编辑'),
+        h(NPopconfirm, { onPositiveClick: () => handleDelete(String(row.id)) }, {
+          trigger: () => h(NButton, { size: 'small', type: 'error' }, () => '删除'),
+          default: () => '确定删除？'
+        })
+      ]);
+    }
+  }
+]);
+
+loadData();
 </script>
+
+<template>
+  <div class="flex-col-stretch gap-16px overflow-hidden lt-sm:overflow-auto">
+    <NForm inline label-placement="left" class="gap-12px">
+      <NFormItem label="用户名">
+        <NInput v-model:value="filters.username" placeholder="用户名" clearable @keyup.enter="handleSearch" />
+      </NFormItem>
+      <NFormItem label="状态">
+        <NSelect v-model:value="filters.status" :options="statusOptions" style="width: 100px" />
+      </NFormItem>
+      <NFormItem>
+        <NSpace>
+          <NButton type="primary" @click="handleSearch">搜索</NButton>
+          <NButton @click="handleReset">重置</NButton>
+        </NSpace>
+      </NFormItem>
+    </NForm>
+
+    <NSpace class="mb-12px">
+      <NButton type="primary" @click="handleAdd">新增</NButton>
+      <NPopconfirm @positive-click="handleBatchDelete">
+        <template #trigger>
+          <NButton type="error" :disabled="!checkedRowKeys.length">批量删除</NButton>
+        </template>
+        确定删除选中的 {{ checkedRowKeys.length }} 项？
+      </NPopconfirm>
+    </NSpace>
+
+    <NDataTable
+      ref="tableRef"
+      v-model:checked-row-keys="checkedRowKeys"
+      :columns="columns"
+      :data="tableData"
+      :loading="loading"
+      :row-key="(row: Api.SystemUser.UserItem) => row.id"
+      :scroll-x="700"
+      flex-height
+      class="flex-1-hidden"
+    />
+
+    <div class="flex justify-end mt-12px">
+      <NPagination
+        v-model:page="pagination.page"
+        v-model:page-size="pagination.pageSize"
+        :item-count="pagination.total"
+        :page-sizes="[10, 20, 50, 100]"
+        show-size-picker
+        @update:page="handlePageChange"
+        @update:page-size="handlePageSizeChange"
+      />
+    </div>
+
+    <NModal v-model:show="showDialog" preset="dialog" :title="isEdit ? '编辑用户' : '新增用户'" style="width: 450px">
+      <NForm ref="formRef" :model="formModel" :rules="formRules" label-placement="left" label-width="80px" class="mt-16px">
+        <NFormItem label="用户名" path="username">
+          <NInput v-model:value="formModel.username" placeholder="用户名" />
+        </NFormItem>
+        <NFormItem label="密码" path="password">
+          <NInput v-model:value="formModel.password" type="password" show-password-on="click"
+            :placeholder="isEdit ? '留空则不修改' : '密码'" />
+        </NFormItem>
+        <NFormItem label="昵称">
+          <NInput v-model:value="formModel.nickname" placeholder="昵称" />
+        </NFormItem>
+        <NFormItem label="状态">
+          <NSwitch v-model:value="formModel.status" />
+        </NFormItem>
+        <NFormItem label-width="90" label="超级管理员">
+          <NSwitch v-model:value="formModel.is_super" />
+        </NFormItem>
+      </NForm>
+      <template #action>
+        <NButton @click="showDialog = false">取消</NButton>
+        <NButton type="primary" @click="handleSave">保存</NButton>
+      </template>
+    </NModal>
+  </div>
+</template>
